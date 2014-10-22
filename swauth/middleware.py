@@ -1079,7 +1079,7 @@ class Swauth(object):
         auth_value = self.auth_encoder().encode(key)
 
         # S3 credential
-        s3_credential = self.handle_put_s3_credential(req, account, user)
+        s3_credential = self._create_s3_credential(req, account, user)
         if s3_credential is None:
             raise Exception('Could not create s3 credential')
 
@@ -1096,48 +1096,6 @@ class Swauth(object):
             raise Exception('Could not create user object: %s %s' %
                             (path, resp.status))
         return HTTPCreated(request=req)
-
-    def handle_put_s3_credential(self, req, account, user):
-        retry_count = 10
-        s3_access_key = ''
-        s3_secret_access_key = ''
-
-        created = False
-        for ii in range(retry_count):
-            s3_access_key = md5(str(time())).hexdigest()
-            path = quote('/v1/%s/%s' % (self.auth_s3_credentials, s3_access_key))
-            resp = self.make_pre_authed_request(req.environ, 'GET', path).get_response(self.app)
-            if resp.status_int // 100 == 2:
-                self.logger.debug('S3 credential already exists (retry count: %d)' % ii)
-                continue
-            self.logger.debug('Create a new S3 credential')
-            created = True
-            break
-
-        if created is False:
-            self.logger.debug('Could not create S3 credential')
-            return None
-
-        path = quote('/v1/%s' % self.auth_s3_credentials)
-        self.make_pre_authed_request(req.environ, 'PUT', path).get_response(self.app)
-
-        s3_secret_access_key = md5(str(time())).hexdigest()
-        path = quote('/v1/%s/%s' % (self.auth_s3_credentials, s3_access_key))
-        resp = self.make_pre_authed_request(
-            req.environ, 'PUT', path,
-            headers={
-                'X-Container-Meta-S3-Secret-Access-Key': s3_secret_access_key,
-                'X-Container-Meta-Account': account,
-                'X-Container-Meta-User': user,
-            }
-        ).get_response(self.app)
-
-        if resp.status_int // 100 != 2:
-            self.logger.debug('Could not store S3 credential (resp status code: %d)' % resp.status_int)
-            return None
-
-        return '%s:%s' % (s3_access_key, s3_secret_access_key)
-
 
     def handle_delete_user(self, req):
         """
@@ -1613,6 +1571,47 @@ class Swauth(object):
                                                           req.headers.get('etag', '-'),
                                                           req.headers.get('x-trans-id', '-'), logged_headers or '-',
                                                           trans_time)))
+
+    def _create_s3_credential(self, req, account, user):
+        retry_count = 10
+        s3_access_key = ''
+        s3_secret_access_key = ''
+
+        created = False
+        for ii in range(retry_count):
+            s3_access_key = md5(str(time())).hexdigest()
+            path = quote('/v1/%s/%s' % (self.auth_s3_credentials, s3_access_key))
+            resp = self.make_pre_authed_request(req.environ, 'GET', path).get_response(self.app)
+            if resp.status_int // 100 == 2:
+                self.logger.debug('S3 credential already exists (retry count: %d)' % ii)
+                continue
+            self.logger.debug('Create a new S3 credential')
+            created = True
+            break
+
+        if created is False:
+            self.logger.debug('Could not create S3 credential')
+            return None
+
+        path = quote('/v1/%s' % self.auth_s3_credentials)
+        self.make_pre_authed_request(req.environ, 'PUT', path).get_response(self.app)
+
+        s3_secret_access_key = md5(str(time())).hexdigest()
+        path = quote('/v1/%s/%s' % (self.auth_s3_credentials, s3_access_key))
+        resp = self.make_pre_authed_request(
+            req.environ, 'PUT', path,
+            headers={
+                'X-Container-Meta-S3-Secret-Access-Key': s3_secret_access_key,
+                'X-Container-Meta-Account': account,
+                'X-Container-Meta-User': user,
+            }
+        ).get_response(self.app)
+
+        if resp.status_int // 100 != 2:
+            self.logger.debug('Could not store S3 credential (resp status code: %d)' % resp.status_int)
+            return None
+
+        return '%s:%s' % (s3_access_key, s3_secret_access_key)
 
 
 def filter_factory(global_conf, **local_conf):
