@@ -1,3 +1,9 @@
+swauth (1.0.8.1-1) a2company; urgency=low
+
+  * A2 company version
+
+ -- A2 company <a2company@a2company.co.kr>  Wed, 22 Oct 2014 12:10:00 +0900
+
 swauth (1.0.8-1) lucid; urgency=low
 
   * Added request.environ[reseller_request] = True if request is coming from an
