@@ -1,6 +1,7 @@
 usr/lib/python*/dist-packages/*
 usr/bin/swauth-add-account
 usr/bin/swauth-add-user
+usr/bin/swauth-aws-credentials
 usr/bin/swauth-cleanup-tokens
 usr/bin/swauth-delete-account
 usr/bin/swauth-delete-user
