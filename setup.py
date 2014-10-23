@@ -76,7 +76,7 @@ setup(
         ],
     install_requires=[],  # removed for better compat
     scripts=[
-        'bin/swauth-add-account', 'bin/swauth-add-user',
+        'bin/swauth-add-account', 'bin/swauth-add-user', 'bin/swauth-aws-credentials',
         'bin/swauth-cleanup-tokens', 'bin/swauth-delete-account',
         'bin/swauth-delete-user', 'bin/swauth-list', 'bin/swauth-prep',
         'bin/swauth-set-account-service',
