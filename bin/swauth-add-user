@@ -15,8 +15,8 @@
 # limitations under the License.
 
 import gettext
-import ast
 from optparse import OptionParser
+from os.path import basename
 from sys import argv, exit
 
 from swift.common.bufferedhttp import http_connect_raw as http_connect
@@ -66,7 +66,6 @@ if __name__ == '__main__':
         parsed_path = '/'
     elif parsed_path[-1] != '/':
         parsed_path += '/'
-
     # Ensure the account exists
     path = '%sv2/%s' % (parsed_path, account)
     headers = {'X-Auth-Admin-User': options.admin_user,
@@ -83,7 +82,6 @@ if __name__ == '__main__':
         resp = conn.getresponse()
         if resp.status // 100 != 2:
             print 'Account creation failed: %s %s' % (resp.status, resp.reason)
-
     # Add the user
     path = '%sv2/%s/%s' % (parsed_path, account, user)
     headers = {'X-Auth-Admin-User': options.admin_user,
@@ -99,22 +97,3 @@ if __name__ == '__main__':
     resp = conn.getresponse()
     if resp.status // 100 != 2:
         exit('User creation failed: %s %s' % (resp.status, resp.reason))
-
-    # Get the user info
-    path = '%sv2/%s/%s' % (parsed_path, account, user)
-    headers = {
-        'X-Auth-Admin-User': options.admin_user,
-        'X-Auth-Admin-Key': options.admin_key,
-    }
-    conn = http_connect(parsed.hostname, parsed.port, 'GET', path, headers,
-                        ssl=(parsed.scheme == 'https'))
-    resp = conn.getresponse()
-    if resp.status // 100 != 2:
-        exit('Could not get user info: %s %s' % (resp.status, resp.reason))
-
-    info = ast.literal_eval(resp.read())
-    s3_credentials = info['s3_credentials']
-    print 'AWS S3 Credential List'
-    for ii in range(len(s3_credentials)):
-        s3_access_key, s3_secret_access_key = s3_credentials[ii].split(':')
-        print ':'.join([s3_access_key, s3_secret_access_key])

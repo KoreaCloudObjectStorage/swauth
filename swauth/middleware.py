@@ -91,7 +91,7 @@ class Swauth(object):
                 raise ValueError(msg)
         self.swauth_remote_timeout = int(conf.get('swauth_remote_timeout', 10))
         self.auth_account = '%s.auth' % self.reseller_prefix
-        self.auth_s3_credentials = '.s3_credentials'
+        self.auth_aws_credentials = '.aws_credentials'
         self.default_swift_cluster = conf.get('default_swift_cluster',
                                               'local#http://127.0.0.1:8080/v1')
         # This setting is a little messy because of the options it has to
@@ -285,11 +285,11 @@ class Swauth(object):
                 return None
             try:
                 account = env['HTTP_AUTHORIZATION'].split(' ')[1]
-                s3_access_key, sign = account.split(':')
+                aws_access_key, sign = account.split(':')
 
-                path = quote('/v1/%s/%s' % (self.auth_s3_credentials, s3_access_key))
+                path = quote('/v1/%s/%s' % (self.auth_aws_credentials, aws_access_key))
                 resp = self.make_pre_authed_request(env, 'GET', path).get_response(self.app)
-                s3_secret_access_key = resp.headers['X-Container-Meta-S3-Secret-Access-Key']
+                aws_secret_access_key = resp.headers['X-Container-Meta-AWS-Secret-Access-Key']
                 account = resp.headers['X-Container-Meta-Account']
                 user = resp.headers['X-Container-Meta-User']
             except Exception, err:
@@ -314,16 +314,13 @@ class Swauth(object):
                 account_id = resp2.headers['x-container-meta-account-id']
 
             path = env['PATH_INFO']
-            env['PATH_INFO'] = path.replace(s3_access_key,
-                                            account_id, 1)
+            env['PATH_INFO'] = path.replace(aws_access_key, account_id, 1)
             detail = json.loads(resp.body)
-            self.logger.debug(detail)
 
             msg = base64.urlsafe_b64decode(unquote(token))
-            s = base64.encodestring(hmac.new(s3_secret_access_key,
+            s = base64.encodestring(hmac.new(aws_secret_access_key,
                                              msg, sha1).digest()).strip()
             if s != sign:
-                self.logger.debug('wrong S3 Signature')
                 return None
             groups = [g['name'] for g in detail['groups']]
             if '.admin' in groups:
@@ -1051,6 +1048,9 @@ class Swauth(object):
             req.headers.get('x-auth-user-reseller-admin') == 'true'
         if reseller_admin:
             admin = True
+        aws_credential_method = req.headers.get('x-auth-aws-credential-method', '')
+        aws_credential_access_key = req.headers.get('x-auth-aws-credential-access-key', '')
+        aws_credential_secret_access_key = req.headers.get('x-auth-aws-credential-secret-access-key', '')
         if req.path_info or not account or account[0] == '.' or not user or \
                         user[0] == '.' or not key:
             return HTTPBadRequest(request=req)
@@ -1078,16 +1078,38 @@ class Swauth(object):
             groups.append('.reseller_admin')
         auth_value = self.auth_encoder().encode(key)
 
-        # S3 credential
-        s3_credential = self._create_s3_credential(req, account, user)
-        if s3_credential is None:
-            raise Exception('Could not create s3 credential')
+        # Get user AWS credential
+        resp = self.make_pre_authed_request(req.environ, 'GET', path, headers=headers).get_response(self.app)
+        if resp.status_int // 100 == 2:
+            info = json.loads(resp.body)
+            aws_credentials = info['aws_credentials']
+        else:
+            aws_credentials = list()
+
+        # AWS credential method
+        if aws_credential_method == 'put':
+            new_aws_credential = self._create_aws_credential(
+                req,
+                account,
+                user,
+                aws_credential_access_key,
+                aws_credential_secret_access_key,
+            )
+            if new_aws_credential is None:
+                raise Exception('Could not create AWS credential')
+            aws_credentials.append(new_aws_credential)
+        if aws_credential_method == 'delete' and aws_credential_access_key != '':
+            updated_aws_credentials = list()
+            for cred in aws_credentials:
+                if not cred.startswith(aws_credential_access_key):
+                    updated_aws_credentials.append(cred)
+            aws_credentials = updated_aws_credentials
 
         resp = self.make_pre_authed_request(
             req.environ, 'PUT', path,
             json.dumps({'auth': auth_value,
                         'groups': [{'name': g} for g in groups],
-                        's3_credentials': [s3_credential]},
+                        'aws_credentials': aws_credentials},
             ),
             headers=headers).get_response(self.app)
         if resp.status_int == 404:
@@ -1572,46 +1594,54 @@ class Swauth(object):
                                                           req.headers.get('x-trans-id', '-'), logged_headers or '-',
                                                           trans_time)))
 
-    def _create_s3_credential(self, req, account, user):
+    def _create_aws_credential(self, req, account, user, aws_access_key, aws_secret_access_key):
         retry_count = 10
-        s3_access_key = ''
-        s3_secret_access_key = ''
 
         created = False
-        for ii in range(retry_count):
-            s3_access_key = md5(str(time())).hexdigest()
-            path = quote('/v1/%s/%s' % (self.auth_s3_credentials, s3_access_key))
+        if aws_access_key != '' and aws_secret_access_key != '':
+            path = quote('/v1/%s/%s' % (self.auth_aws_credentials, aws_access_key))
             resp = self.make_pre_authed_request(req.environ, 'GET', path).get_response(self.app)
             if resp.status_int // 100 == 2:
-                self.logger.debug('S3 credential already exists (retry count: %d)' % ii)
-                continue
-            self.logger.debug('Create a new S3 credential')
+                self.logger.debug('AWS credential already exists')
+                return None
             created = True
-            break
+        else:
+            for ii in range(retry_count):
+                aws_access_key = md5(str(time())).hexdigest()
+                path = quote('/v1/%s/%s' % (self.auth_aws_credentials, aws_access_key))
+                resp = self.make_pre_authed_request(req.environ, 'GET', path).get_response(self.app)
+                if resp.status_int // 100 == 2:
+                    self.logger.debug('AWS credential already exists (retry count: %d)' % ii)
+                    continue
+                created = True
+                break
 
         if created is False:
-            self.logger.debug('Could not create S3 credential')
+            self.logger.debug('Could not create AWS credential')
             return None
 
-        path = quote('/v1/%s' % self.auth_s3_credentials)
+        path = quote('/v1/%s' % self.auth_aws_credentials)
         self.make_pre_authed_request(req.environ, 'PUT', path).get_response(self.app)
 
-        s3_secret_access_key = md5(str(time())).hexdigest()
-        path = quote('/v1/%s/%s' % (self.auth_s3_credentials, s3_access_key))
+        if aws_secret_access_key == '':
+            aws_secret_access_key = md5(str(time())).hexdigest()
+        path = quote('/v1/%s/%s' % (self.auth_aws_credentials, aws_access_key))
         resp = self.make_pre_authed_request(
             req.environ, 'PUT', path,
             headers={
-                'X-Container-Meta-S3-Secret-Access-Key': s3_secret_access_key,
+                'X-Container-Meta-AWS-Secret-Access-Key': aws_secret_access_key,
                 'X-Container-Meta-Account': account,
                 'X-Container-Meta-User': user,
             }
         ).get_response(self.app)
 
         if resp.status_int // 100 != 2:
-            self.logger.debug('Could not store S3 credential (resp status code: %d)' % resp.status_int)
+            self.logger.debug('Could not store AWS credential (resp status code: %d)' % resp.status_int)
             return None
 
-        return '%s:%s' % (s3_access_key, s3_secret_access_key)
+        self.logger.debug('Create a new AWS credential')
+
+        return '%s:%s' % (aws_access_key, aws_secret_access_key)
 
 
 def filter_factory(global_conf, **local_conf):
