@@ -35,6 +35,7 @@ from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPConflict, \
 
 from swift.common.bufferedhttp import http_connect_raw as http_connect
 from swift.common.middleware.acl import clean_acl, parse_acl, referrer_allowed
+from swift.common.utils import config_true_value
 from swift.common.utils import cache_from_env, get_logger, get_remote_client, \
     split_path, TRUE_VALUES, urlparse
 import swift.common.wsgi
@@ -92,6 +93,7 @@ class Swauth(object):
         self.swauth_remote_timeout = int(conf.get('swauth_remote_timeout', 10))
         self.auth_account = '%s.auth' % self.reseller_prefix
         self.auth_aws_credentials = '.aws_credentials'
+        self.auth_aws_bypassing = config_true_value(conf.get('auth_aws_bypassing', False))
         self.default_swift_cluster = conf.get('default_swift_cluster',
                                               'local#http://127.0.0.1:8080/v1')
         # This setting is a little messy because of the options it has to
@@ -289,9 +291,9 @@ class Swauth(object):
 
                 path = quote('/v1/%s/%s' % (self.auth_aws_credentials, aws_access_key))
                 resp = self.make_pre_authed_request(env, 'GET', path).get_response(self.app)
-                aws_secret_access_key = resp.headers['X-Container-Meta-AWS-Secret-Access-Key']
-                account = resp.headers['X-Container-Meta-Account']
-                user = resp.headers['X-Container-Meta-User']
+                aws_secret_access_key = resp.headers['X-Container-Sysmeta-AWS-Secret-Access-Key']
+                account = resp.headers['X-Container-Sysmeta-Account']
+                user = resp.headers['X-Container-Sysmeta-User']
             except Exception, err:
                 self.logger.debug(
                     'Swauth cannot parse Authorization header value %r' %
@@ -317,11 +319,14 @@ class Swauth(object):
             env['PATH_INFO'] = path.replace(aws_access_key, account_id, 1)
             detail = json.loads(resp.body)
 
-            msg = base64.urlsafe_b64decode(unquote(token))
-            s = base64.encodestring(hmac.new(aws_secret_access_key,
-                                             msg, sha1).digest()).strip()
-            if s != sign:
-                return None
+            if self.auth_aws_bypassing:
+                self.logger.debug('!!! CAUTION !!! this server is running on bypassing AWS authentication.')
+            else:
+                msg = base64.urlsafe_b64decode(unquote(token))
+                s = base64.encodestring(hmac.new(aws_secret_access_key, msg, sha1).digest()).strip()
+                if s != sign:
+                    return None
+
             groups = [g['name'] for g in detail['groups']]
             if '.admin' in groups:
                 groups.remove('.admin')
@@ -1096,12 +1101,17 @@ class Swauth(object):
                 aws_credential_secret_access_key,
             )
             if new_aws_credential is None:
-                raise Exception('Could not create AWS credential')
+                self.logger.debug('Could not create AWS credential')
+                return HTTPBadRequest(request=req)
             aws_credentials.append(new_aws_credential)
         if aws_credential_method == 'delete' and aws_credential_access_key != '':
             updated_aws_credentials = list()
             for cred in aws_credentials:
-                if not cred.startswith(aws_credential_access_key):
+                if cred.startswith(aws_credential_access_key):
+                    cred_path = quote('/v1/%s/%s' % (self.auth_aws_credentials, aws_credential_access_key))
+                    self.make_pre_authed_request(req.environ, 'DELETE', cred_path).get_response(self.app)
+                    self.logger.debug('Delete an AWS credential (access key = %s)' % aws_credential_access_key)
+                else:
                     updated_aws_credentials.append(cred)
             aws_credentials = updated_aws_credentials
 
@@ -1141,7 +1151,7 @@ class Swauth(object):
         # Delete the user's existing token, if any.
         path = quote('/v1/%s/%s/%s' % (self.auth_account, account, user))
         resp = self.make_pre_authed_request(
-            req.environ, 'HEAD', path).get_response(self.app)
+            req.environ, 'GET', path).get_response(self.app)
         if resp.status_int == 404:
             return HTTPNotFound(request=req)
         elif resp.status_int // 100 != 2:
@@ -1156,6 +1166,15 @@ class Swauth(object):
             if resp.status_int // 100 != 2 and resp.status_int != 404:
                 raise Exception('Could not delete possibly existing token: '
                                 '%s %s' % (path, resp.status))
+
+        self.logger.debug(resp.body)
+        info = json.loads(resp.body)
+        aws_credentials = info['aws_credentials']
+        for cred in aws_credentials:
+            aws_credential_access_key = cred.split(':')[0]
+            cred_path = quote('/v1/%s/%s' % (self.auth_aws_credentials, aws_credential_access_key))
+            self.make_pre_authed_request(req.environ, 'DELETE', cred_path).get_response(self.app)
+            self.logger.debug('Delete an AWS credential (access key = %s)' % aws_credential_access_key)
 
         # Delete the user entry itself.
         path = quote('/v1/%s/%s/%s' % (self.auth_account, account, user))
@@ -1605,7 +1624,7 @@ class Swauth(object):
                 self.logger.debug('AWS credential already exists')
                 return None
             created = True
-        else:
+        elif aws_access_key == '' and aws_secret_access_key == '':
             for ii in range(retry_count):
                 aws_access_key = md5(str(time())).hexdigest()
                 path = quote('/v1/%s/%s' % (self.auth_aws_credentials, aws_access_key))
@@ -1615,6 +1634,10 @@ class Swauth(object):
                     continue
                 created = True
                 break
+        else:
+            self.logger.debug("Bad request (access key = '%s', secret_access_key = '%s')", aws_access_key,
+                              aws_secret_access_key)
+            return None
 
         if created is False:
             self.logger.debug('Could not create AWS credential')
@@ -1629,9 +1652,9 @@ class Swauth(object):
         resp = self.make_pre_authed_request(
             req.environ, 'PUT', path,
             headers={
-                'X-Container-Meta-AWS-Secret-Access-Key': aws_secret_access_key,
-                'X-Container-Meta-Account': account,
-                'X-Container-Meta-User': user,
+                'X-Container-Sysmeta-AWS-Secret-Access-Key': aws_secret_access_key,
+                'X-Container-Sysmeta-Account': account,
+                'X-Container-Sysmeta-User': user,
             }
         ).get_response(self.app)
 
@@ -1639,7 +1662,7 @@ class Swauth(object):
             self.logger.debug('Could not store AWS credential (resp status code: %d)' % resp.status_int)
             return None
 
-        self.logger.debug('Create a new AWS credential')
+        self.logger.debug('Create a new AWS credential (access key = %s)' % aws_access_key)
 
         return '%s:%s' % (aws_access_key, aws_secret_access_key)
 
