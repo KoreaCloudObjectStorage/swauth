@@ -1167,7 +1167,6 @@ class Swauth(object):
                 raise Exception('Could not delete possibly existing token: '
                                 '%s %s' % (path, resp.status))
 
-        self.logger.debug(resp.body)
         info = json.loads(resp.body)
         aws_credentials = info['aws_credentials']
         for cred in aws_credentials:
